@@ -243,7 +243,7 @@ export default function Home() {
       <Toaster position="top-right" />
       <div className="flex flex-col items-center justify-center py-5">
         <div className="text-xl font-bold text-blue-300">Temp-File-Holder</div>
-        <div className="text-red-500">Note - It will hold file only for 4 Hours then after it will automatically delete all files</div>
+        <div className="text-red-500">Note - Make sure you delete your file after using I dont want to load up my servers</div>
       </div>
       <div className="container max-w-[1200px] flex flex-col items-center mt-10">
         <div
