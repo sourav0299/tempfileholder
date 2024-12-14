@@ -112,8 +112,22 @@ export default function Home() {
         throw new Error(response.error);
       }
 
+      const mongoDbResponse = await fetch("/api/files", {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url }),
+      });
+
+      const mongoDbData = await mongoDbResponse.json();
+
+      if (!mongoDbData.success) {
+        throw new Error("Failed to delete file URL from MongoDB");
+      }
+
       setUploadedFiles((prevFiles) => prevFiles.filter((file) => file !== url));
-      toast.success("File deleted successfully");
+      toast.success("File deleted successfully from Cloudinary and MongoDB");
     } catch (error) {
       if (error instanceof Error) {
         toast.error(`Failed to delete file: ${error.message}`);
@@ -225,8 +239,12 @@ export default function Home() {
   };
 
   return (
-    <div className="flex items-center justify-center">
+    <div className="flex items-center justify-center flex-col">
       <Toaster position="top-right" />
+      <div className="flex flex-col items-center justify-center py-5">
+        <div className="text-xl font-bold text-blue-300">Temp-File-Holder</div>
+        <div className="text-red-500">Note - It will hold file only for 4 Hours then after it will automatically delete all files</div>
+      </div>
       <div className="container max-w-[1200px] flex flex-col items-center mt-10">
         <div
           className="border-2 border-dashed border-gray-300 rounded-lg p-8 mb-4 text-center cursor-pointer w-full"
