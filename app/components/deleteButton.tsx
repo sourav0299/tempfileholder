@@ -8,7 +8,13 @@ interface DeleteButtonProps {
 const Button: React.FC<DeleteButtonProps> = ({ onDelete }) => {
   return (
     <StyledWrapper>
-      <button className="button">
+      <button
+        className="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+      >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           fill="none"

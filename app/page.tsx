@@ -46,7 +46,6 @@ export default function Home() {
       const data = await response.json();
       if (response.ok) {
         await storeFileUrl(data.url);
-        toast.success("File uploaded successfully");
         return data.url;
       } else {
         throw new Error(data.error || "Upload failed");
@@ -68,7 +67,7 @@ export default function Home() {
       });
       const data = await response.json();
       if (!data.success) {
-        throw new Error("Failed to store file URL");
+        toast.error("Failed to store file URL");
       }
     } catch (error) {
       toast.error("Failed to store file URL");
@@ -96,29 +95,60 @@ export default function Home() {
 
   const handleDelete = async (url: string) => {
     try {
+      const urlParts = url.split("/");
+      const folderAndFileName = urlParts.slice(-2).join("/");
+      const publicId =
+        folderAndFileName.split("/").pop()?.split(".")[0].replace(/v\d+/, "") ||
+        "";
+
+      let response = await deleteFile(publicId);
+
+      if (response.error) {
+        const fullPublicId = folderAndFileName.split(".")[0];
+        response = await deleteFile(fullPublicId);
+      }
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      setUploadedFiles((prevFiles) => prevFiles.filter((file) => file !== url));
+      toast.success("File deleted successfully");
+    } catch (error) {
+      if (error instanceof Error) {
+        toast.error(`Failed to delete file: ${error.message}`);
+      } else {
+        toast.error("Failed to delete file");
+      }
+    }
+  };
+
+  async function deleteFile(publicId: string) {
+    try {
       const response = await fetch("/api/delete", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ publicId }),
       });
-      const data = await response.json();
-      if (data.success) {
-        setUploadedFiles(uploadedFiles.filter((file) => file !== url));
-        setFileSizes((prevSizes) => {
-          const newSizes = { ...prevSizes };
-          delete newSizes[url];
-          return newSizes;
-        });
-        toast.success("File deleted successfully");
-      } else {
-        throw new Error(data.error || "Delete failed");
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(
+          `HTTP error! status: ${response.status}, message: ${JSON.stringify(
+            errorData
+          )}`
+        );
       }
+
+      return await response.json();
     } catch (error) {
-      toast.error("Failed to delete the file. Please try again.");
+      return {
+        error: error instanceof Error ? error.message : "Unknown error",
+      };
     }
-  };
+  }
 
   const handleFiles = async (files: File[]) => {
     setIsUploading(true);
@@ -171,7 +201,7 @@ export default function Home() {
       const size = response.headers.get("Content-Length");
       return size ? parseInt(size, 10) : 0;
     } catch (error) {
-      console.error("Error fetching file size:", error);
+      toast.error("Error fetching file size");
       return 0;
     }
   };
@@ -217,9 +247,9 @@ export default function Home() {
         </div>
         {isUploading && <p>Uploading...</p>}
         {uploadedFiles.length > 0 && (
-          <div className="mt-4 w-full">
+          <div className="mt-4 w-full flex items-center justify-center flex-col">
             <h2 className="text-lg font-semibold mb-2">Uploaded Files:</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
               {uploadedFiles.slice(0, 9).map((url, index) => {
                 const fileType = getFileType(url);
                 return (
