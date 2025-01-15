@@ -3,12 +3,18 @@ import { useState, useRef, useEffect } from "react";
 import DeleteButton from "./components/deleteButton";
 import DownloadButton from "../app/components/downloadButton";
 import { Toaster, toast } from "react-hot-toast";
+import UploadProgress from "./components/UploadProgress";
 
 export default function Home() {
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [fileSizes, setFileSizes] = useState<Record<string, number>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadSpeed, setUploadSpeed] = useState(0);
+  const [uploadedSize, setUploadedSize] = useState(0);
+  const [totalSize, setTotalSize] = useState(0);
+  const [isUploadProgressVisible, setIsUploadProgressVisible] = useState(false);
 
   useEffect(() => {
     fetchFiles();
@@ -35,21 +41,53 @@ export default function Home() {
   };
 
   const uploadToServer = async (file: File) => {
+    setIsUploadProgressVisible(true);
     const formData = new FormData();
     formData.append("file", file);
 
+    setTotalSize(file.size);
+
     try {
-      const response = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/upload", true);
+
+      let startTime = Date.now();
+      let lastLoaded = 0;
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percentComplete = (event.loaded / event.total) * 100;
+          setUploadProgress(percentComplete);
+          setUploadedSize(event.loaded);
+
+          // Calculate speed
+          const currentTime = Date.now();
+          const elapsedTime = (currentTime - startTime) / 1000; // in seconds
+          const loadedSinceLastUpdate = event.loaded - lastLoaded;
+          const speed = loadedSinceLastUpdate / elapsedTime / (1024 * 1024); // in MB/s
+          setUploadSpeed(speed);
+
+          // Reset for next update
+          startTime = currentTime;
+          lastLoaded = event.loaded;
+        }
+      };
+
+      return new Promise((resolve, reject) => {
+        xhr.onload = async () => {
+          if (xhr.status === 200) {
+            const data = JSON.parse(xhr.responseText);
+            await storeFileUrl(data.url);
+            resolve(data.url);
+          } else {
+            reject(new Error("Upload failed"));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Upload failed"));
+
+        xhr.send(formData);
       });
-      const data = await response.json();
-      if (response.ok) {
-        await storeFileUrl(data.url);
-        return data.url;
-      } else {
-        throw new Error(data.error || "Upload failed");
-      }
     } catch (error) {
       toast.error("Upload failed");
       return null;
@@ -243,7 +281,10 @@ export default function Home() {
       <Toaster position="top-right" />
       <div className="flex flex-col items-center justify-center py-5">
         <div className="text-xl font-bold text-blue-300">Temp-File-Holder</div>
-        <div className="text-red-500">Note - Make sure you delete your file after using I dont want to load up my servers</div>
+        <div className="text-red-500">
+          Note - Make sure you delete your file after using I dont want to load
+          up my servers
+        </div>
       </div>
       <div className="container max-w-[1200px] flex flex-col items-center mt-10">
         <div
@@ -263,7 +304,15 @@ export default function Home() {
             multiple
           />
         </div>
-        {isUploading && <p>Uploading...</p>}
+        {isUploading && (
+          <UploadProgress
+            progress={uploadProgress}
+            speed={uploadSpeed}
+            uploaded={uploadedSize}
+            total={totalSize}
+            isVisible={isUploadProgressVisible}
+          />
+        )}
         {uploadedFiles.length > 0 && (
           <div className="mt-4 w-full flex items-center justify-center flex-col">
             <h2 className="text-lg font-semibold mb-2">Uploaded Files:</h2>
