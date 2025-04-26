@@ -15,6 +15,163 @@ export default function Home() {
   const [uploadedSize, setUploadedSize] = useState(0);
   const [totalSize, setTotalSize] = useState(0);
   const [isUploadProgressVisible, setIsUploadProgressVisible] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState<{
+    [key: string]: {
+      file: File;
+      progress: number;
+      speed: number;
+      uploaded: number;
+      status: 'queued' | 'uploading' | 'completed' | 'error';
+      position: number;
+      controller?: AbortController;
+    };
+  }>({});
+
+  // Add a ref to track active uploads
+  const activeUploadRef = useRef<boolean>(false);
+  const uploadQueueRef = useRef(uploadQueue);
+
+  // Separate processQueue function for better control
+  const processQueue = async () => {
+    console.log('Processing queue, active:', activeUploadRef.current);
+    
+    if (activeUploadRef.current) {
+      console.log('Upload already in progress');
+      return;
+    }
+
+    const nextUpload = Object.entries(uploadQueueRef.current)
+      .filter(([_, data]) => data.status === 'queued')
+      .sort((a, b) => a[1].position - b[1].position)[0];
+
+    if (!nextUpload) {
+      console.log('No files in queue');
+      return;
+    }
+
+    const [fileId, data] = nextUpload;
+    console.log('Starting upload for:', { fileId, fileName: data.file.name });
+    activeUploadRef.current = true;
+
+    try {
+      // Update status to uploading
+      setUploadQueue(prev => ({
+        ...prev,
+        [fileId]: { ...data, status: 'uploading' }
+      }));
+
+      const url = await uploadToServer(data.file, fileId);
+      console.log('Upload result:', url);
+
+      if (url) {
+        // Remove completed upload from queue
+        setUploadQueue(prev => {
+          const newQueue = { ...prev };
+          delete newQueue[fileId];
+          return newQueue;
+        });
+        setUploadedFiles(prev => [...prev, url]);
+        toast.success(`${data.file.name} uploaded successfully`);
+      }
+    } catch (error) {
+      console.error('Process queue error:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to upload file');
+    } finally {
+      activeUploadRef.current = false;
+      
+      // Process next file in queue
+      setTimeout(() => {
+        const remainingFiles = Object.values(uploadQueueRef.current)
+          .filter(data => data.status === 'queued').length;
+        console.log('Remaining files to process:', remainingFiles);
+        if (remainingFiles > 0) {
+          processQueue();
+        }
+      }, 100);
+    }
+  };
+
+  const handleFiles = async (files: File[]) => {
+    try {
+      console.log('HandleFiles called with', files.length, 'files');
+      
+      // Add files to upload queue with position numbers
+      const newQueue = { ...uploadQueue };
+      const startPosition = Math.max(
+        0,
+        ...Object.values(uploadQueue).map(data => data.position)
+      ) + 1;
+
+      files.forEach((file, index) => {
+        const fileId = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        console.log('Adding to queue:', { fileId, fileName: file.name, size: file.size });
+        
+        newQueue[fileId] = {
+          file,
+          progress: 0,
+          speed: 0,
+          uploaded: 0,
+          status: 'queued',
+          position: startPosition + index,
+          controller: undefined
+        };
+      });
+
+      console.log('Setting new queue state');
+      setUploadQueue(newQueue);
+      
+      // Force queue processing to start
+      activeUploadRef.current = false;
+      processQueue();
+    } catch (error) {
+      console.error('Error in handleFiles:', error);
+      toast.error('Failed to queue files for upload');
+    }
+  };
+
+  // Keep the ref in sync with the state
+  useEffect(() => {
+    uploadQueueRef.current = uploadQueue;
+  }, [uploadQueue]);
+
+  // Update the upload queue effect to use the processQueue function
+  useEffect(() => {
+    const queuedFiles = Object.values(uploadQueue)
+      .filter(data => data.status === 'queued').length;
+    
+    if (queuedFiles > 0 && !activeUploadRef.current) {
+      console.log('Queue changed, starting processing');
+      processQueue();
+    }
+  }, [uploadQueue]);
+
+  // Remove the localStorage load effect and add cleanup on mount/unmount
+  useEffect(() => {
+    // Clear any existing uploads in localStorage
+    localStorage.removeItem('uploadQueue');
+
+    // Add event listener for beforeunload
+    const handleBeforeUnload = () => {
+      // Cancel all active uploads
+      Object.entries(uploadQueueRef.current).forEach(([fileId, data]) => {
+        if (data.status === 'uploading' || data.status === 'queued') {
+          if (data.controller) {
+            data.controller.abort();
+          }
+        }
+      });
+      // Clear the queue from localStorage
+      localStorage.removeItem('uploadQueue');
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      // Cleanup on unmount
+      handleBeforeUnload();
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
 
   useEffect(() => {
     fetchFiles();
@@ -40,57 +197,216 @@ export default function Home() {
     }
   };
 
-  const uploadToServer = async (file: File) => {
-    setIsUploadProgressVisible(true);
-    const formData = new FormData();
-    formData.append("file", file);
+  const cancelUpload = async (fileId: string) => {
+    try {
+      console.log('Cancelling upload:', fileId);
+      
+      // Get the upload data
+      const upload = uploadQueueRef.current[fileId];
+      if (!upload) {
+        console.log('Upload not found:', fileId);
+        return;
+      }
 
-    setTotalSize(file.size);
+      // Abort any ongoing request
+      if (upload.controller) {
+        upload.controller.abort();
+      }
+
+      // Update queue state immediately
+      setUploadQueue(prev => {
+        const newQueue = { ...prev };
+        delete newQueue[fileId]; // Remove the cancelled upload
+        return newQueue;
+      });
+
+      // Reset active upload flag if this was the active upload
+      if (upload.status === 'uploading') {
+        activeUploadRef.current = false;
+      }
+
+      toast.success('Upload cancelled');
+
+      // Process next file in queue
+      const remainingFiles = Object.values(uploadQueueRef.current)
+        .filter(data => data.status === 'queued').length;
+
+      if (remainingFiles > 0) {
+        setTimeout(() => {
+          processQueue();
+        }, 100);
+      }
+    } catch (error) {
+      console.error('Error during cancellation:', error);
+      toast.error('Error cancelling upload');
+    }
+  };
+
+  const uploadToServer = async (file: File, fileId: string) => {
+    console.log('Starting upload for:', { fileId, fileName: file.name, size: file.size });
+    let isCancelled = false;
+    let currentController: AbortController | null = null;
 
     try {
-      const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/upload", true);
+      // Check if file is larger than 100MB
+      const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+      const CHUNK_SIZE = 99 * 1024 * 1024; // 99MB chunks
 
-      let startTime = Date.now();
-      let lastLoaded = 0;
+      // For files under 100MB, upload directly
+      if (file.size <= LARGE_FILE_THRESHOLD) {
+        console.log('Small file, uploading directly');
+        currentController = new AbortController();
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('fileId', fileId);
+        formData.append('originalName', file.name);
+        formData.append('chunkIndex', '0');
+        formData.append('totalChunks', '1');
+        formData.append('isComplete', 'true');
 
-      xhr.upload.onprogress = (event) => {
-        if (event.lengthComputable) {
-          const percentComplete = (event.loaded / event.total) * 100;
-          setUploadProgress(percentComplete);
-          setUploadedSize(event.loaded);
+        try {
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+            signal: currentController.signal
+          });
 
-          // Calculate speed
-          const currentTime = Date.now();
-          const elapsedTime = (currentTime - startTime) / 1000; // in seconds
-          const loadedSinceLastUpdate = event.loaded - lastLoaded;
-          const speed = loadedSinceLastUpdate / elapsedTime / (1024 * 1024); // in MB/s
-          setUploadSpeed(speed);
-
-          // Reset for next update
-          startTime = currentTime;
-          lastLoaded = event.loaded;
-        }
-      };
-
-      return new Promise((resolve, reject) => {
-        xhr.onload = async () => {
-          if (xhr.status === 200) {
-            const data = JSON.parse(xhr.responseText);
-            await storeFileUrl(data.url);
-            resolve(data.url);
-          } else {
-            reject(new Error("Upload failed"));
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+            throw new Error(errorData.error || `Upload failed with status ${response.status}`);
           }
-        };
 
-        xhr.onerror = () => reject(new Error("Upload failed"));
+          const data = await response.json();
+          console.log('Upload response:', data);
 
-        xhr.send(formData);
-      });
-    } catch (error) {
-      toast.error("Upload failed");
+          if (!data.success) {
+            throw new Error(data.error || 'Upload failed');
+          }
+
+          // Update progress to 100%
+          setUploadQueue(prev => ({
+            ...prev,
+            [fileId]: {
+              ...prev[fileId],
+              progress: 100,
+              uploaded: file.size,
+              status: 'completed'
+            }
+          }));
+
+          return data.url;
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') {
+            console.log('Upload aborted');
+            isCancelled = true;
+            return null;
+          }
+          throw error;
+        }
+      }
+
+      // For large files, use chunked upload
+      console.log('Large file, using chunked upload');
+      const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+      let uploadedUrl = '';
+      let startTime = Date.now();
+      let totalUploaded = 0;
+
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        // Check if upload was cancelled
+        const currentQueue = uploadQueueRef.current[fileId];
+        if (!currentQueue || currentQueue.status !== 'uploading' || isCancelled) {
+          console.log('Upload cancelled or removed from queue');
+          return null;
+        }
+
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+        console.log('Processing chunk:', { chunkIndex, start, end, size: chunk.size });
+
+        currentController = new AbortController();
+        const formData = new FormData();
+        formData.append('file', chunk);
+        formData.append('chunkIndex', chunkIndex.toString());
+        formData.append('totalChunks', totalChunks.toString());
+        formData.append('fileId', fileId);
+        formData.append('originalName', file.name);
+        formData.append('isComplete', (chunkIndex === totalChunks - 1).toString());
+
+        try {
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            body: formData,
+            signal: currentController.signal
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+            throw new Error(errorData.error || `Chunk upload failed with status ${response.status}`);
+          }
+
+          const data = await response.json();
+          console.log('Chunk upload response:', data);
+
+          if (!data.success) {
+            throw new Error(data.error || 'Chunk upload failed');
+          }
+
+          uploadedUrl = data.url || uploadedUrl;
+          totalUploaded += chunk.size;
+
+          // Update progress
+          const currentTime = Date.now();
+          const elapsedTime = (currentTime - startTime) / 1000;
+          const speed = elapsedTime > 0 ? (chunk.size / elapsedTime) / (1024 * 1024) : 0;
+
+          setUploadQueue(prev => ({
+            ...prev,
+            [fileId]: {
+              ...prev[fileId],
+              progress: (totalUploaded / file.size) * 100,
+              speed,
+              uploaded: totalUploaded
+            }
+          }));
+
+          startTime = currentTime;
+
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') {
+            console.log('Chunk upload aborted');
+            isCancelled = true;
+            return null;
+          }
+          throw error;
+        } finally {
+          currentController = null;
+        }
+      }
+
+      if (uploadedUrl && !isCancelled) {
+        console.log('Upload completed successfully');
+        await storeFileUrl(uploadedUrl);
+        return uploadedUrl;
+      }
       return null;
+
+    } catch (error) {
+      console.error('Upload error:', error);
+      // Update upload status to error
+      setUploadQueue(prev => ({
+        ...prev,
+        [fileId]: {
+          ...prev[fileId],
+          status: 'error',
+          progress: 0,
+          speed: 0,
+          uploaded: 0
+        }
+      }));
+      throw error;
     }
   };
 
@@ -122,34 +438,44 @@ export default function Home() {
     event.preventDefault();
   };
 
-  const handleFileInput = async (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    if (event.target.files) {
-      const files = Array.from(event.target.files);
-      await handleFiles(files);
+  const handleFileInput = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    try {
+      if (event.target.files && event.target.files.length > 0) {
+        console.log('File input triggered');
+        const files = Array.from(event.target.files);
+        console.log('Files to upload:', files.map(f => ({ name: f.name, size: f.size })));
+        event.target.value = ''; // Reset input after getting files
+        await handleFiles(files);
+      }
+    } catch (error) {
+      console.error('Error in handleFileInput:', error);
+      toast.error('Failed to process selected files');
     }
   };
 
   const handleDelete = async (url: string) => {
     try {
-      const urlParts = url.split("/");
-      const folderAndFileName = urlParts.slice(-2).join("/");
-      const publicId =
-        folderAndFileName.split("/").pop()?.split(".")[0].replace(/v\d+/, "") ||
-        "";
+      console.log('Attempting to delete:', url);
+      
+      // Extract the public ID from the Cloudinary URL
+      const matches = url.match(/\/v\d+\/([^/]+)\.[^.]+$/);
+      if (!matches || !matches[1]) {
+        console.error('Invalid Cloudinary URL format:', url);
+        throw new Error('Invalid file URL format');
+      }
+      
+      const publicId = matches[1];
+      console.log('Extracted public ID:', publicId);
 
-      let response = await deleteFile(publicId);
+      // Try to delete from Cloudinary first
+      const cloudinaryResponse = await deleteFile(publicId);
+      console.log('Cloudinary delete response:', cloudinaryResponse);
 
-      if (response.error) {
-        const fullPublicId = folderAndFileName.split(".")[0];
-        response = await deleteFile(fullPublicId);
+      if (cloudinaryResponse.error) {
+        throw new Error(cloudinaryResponse.error);
       }
 
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
+      // If Cloudinary delete was successful, delete from MongoDB
       const mongoDbResponse = await fetch("/api/files", {
         method: "DELETE",
         headers: {
@@ -159,24 +485,30 @@ export default function Home() {
       });
 
       const mongoDbData = await mongoDbResponse.json();
+      console.log('MongoDB delete response:', mongoDbData);
 
       if (!mongoDbData.success) {
-        throw new Error("Failed to delete file URL from MongoDB");
+        throw new Error("Failed to delete file reference from database");
       }
 
+      // Update the UI only after both deletions are successful
       setUploadedFiles((prevFiles) => prevFiles.filter((file) => file !== url));
-      toast.success("File deleted successfully from Cloudinary and MongoDB");
+      toast.success("File deleted successfully");
+
     } catch (error) {
-      if (error instanceof Error) {
-        toast.error(`Failed to delete file: ${error.message}`);
-      } else {
-        toast.error("Failed to delete file");
-      }
+      console.error("Delete error:", error);
+      // More specific error messages based on the error
+      const errorMessage = error instanceof Error 
+        ? error.message
+        : "Failed to delete file";
+      toast.error(errorMessage);
     }
   };
 
   async function deleteFile(publicId: string) {
     try {
+      console.log('Sending delete request for public ID:', publicId);
+      
       const response = await fetch("/api/delete", {
         method: "POST",
         headers: {
@@ -187,31 +519,23 @@ export default function Home() {
 
       if (!response.ok) {
         const errorData = await response.json();
+        console.error('Delete API error response:', errorData);
         throw new Error(
-          `HTTP error! status: ${response.status}, message: ${JSON.stringify(
-            errorData
-          )}`
+          `Delete failed: ${errorData.error || response.statusText}`
         );
       }
 
-      return await response.json();
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : "Unknown error",
-      };
-    }
-  }
+      const result = await response.json();
+      console.log('Delete API success response:', result);
+      return result;
 
-  const handleFiles = async (files: File[]) => {
-    setIsUploading(true);
-    const uploadedUrls = await Promise.all(
-      files.map((file) => uploadToServer(file))
-    );
-    const newUrls = uploadedUrls.filter((url): url is string => url !== null);
-    setUploadedFiles((prev) => [...prev, ...newUrls]);
-    setIsUploading(false);
-    if (newUrls.length > 0) {
-      toast.success(`${newUrls.length} file(s) uploaded successfully`);
+    } catch (error) {
+      console.error('Delete file error:', error);
+      return {
+        error: error instanceof Error 
+          ? error.message 
+          : "Failed to delete file from storage"
+      };
     }
   };
 
@@ -276,6 +600,39 @@ export default function Home() {
     )}`;
   };
 
+  // Render upload progress for all files in queue
+  const renderUploadProgress = () => {
+    const activeUploads = Object.entries(uploadQueue)
+      .map(([fileId, data]) => ({
+        fileName: data.file.name,
+        progress: data.progress,
+        speed: data.speed,
+        uploaded: data.uploaded,
+        total: data.file.size,
+        status: data.status,
+        position: data.position
+      }))
+      .sort((a, b) => a.position - b.position);
+
+    if (activeUploads.length === 0) return null;
+
+    return (
+      <div className="fixed bottom-4 left-4 z-50">
+        <UploadProgress
+          uploads={activeUploads}
+          onCancel={(position) => {
+            const fileId = Object.entries(uploadQueue).find(
+              ([_, data]) => data.position === position
+            )?.[0];
+            if (fileId) {
+              cancelUpload(fileId);
+            }
+          }}
+        />
+      </div>
+    );
+  };
+
   return (
     <div className="flex items-center justify-center flex-col">
       <Toaster position="top-right" />
@@ -304,15 +661,7 @@ export default function Home() {
             multiple
           />
         </div>
-        {isUploading && (
-          <UploadProgress
-            progress={uploadProgress}
-            speed={uploadSpeed}
-            uploaded={uploadedSize}
-            total={totalSize}
-            isVisible={isUploadProgressVisible}
-          />
-        )}
+        {renderUploadProgress()}
         {uploadedFiles.length > 0 && (
           <div className="mt-4 w-full flex items-center justify-center flex-col">
             <h2 className="text-lg font-semibold mb-2">Uploaded Files:</h2>
