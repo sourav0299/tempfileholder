@@ -3,12 +3,16 @@ import clientPromise from '../../mongodb';
 
 export async function POST(request: Request) {
   try {
-    const { url } = await request.json();
+    const { url, public_id } = await request.json();
     const client = await clientPromise;
     const db = client.db('fileUploader');
     const filesCollection = db.collection('files');
 
-    const result = await filesCollection.insertOne({ url, createdAt: new Date() });
+    const result = await filesCollection.insertOne({ 
+      url, 
+      public_id,
+      createdAt: new Date() 
+    });
 
     return NextResponse.json({ success: true, id: result.insertedId });
   } catch (error) {
@@ -22,13 +26,18 @@ export async function GET() {
     const client = await clientPromise;
     const db = client.db('fileUploader');
     const filesCollection = db.collection('files');
-
-    const files = await filesCollection.find({}).sort({ createdAt: -1 }).toArray();
-
-    return NextResponse.json({ success: true, files });
+    
+    const files = await filesCollection.find({}).toArray();
+    return NextResponse.json({ 
+      success: true, 
+      files: files.map(file => ({ 
+        url: file.url, 
+        public_id: file.public_id 
+      })) 
+    });
   } catch (error) {
-    console.error('Error retrieving files:', error);
-    return NextResponse.json({ success: false, error: 'Failed to retrieve files' }, { status: 500 });
+    console.error('Error fetching files:', error);
+    return NextResponse.json({ success: false, error: 'Failed to fetch files' }, { status: 500 });
   }
 }
 
@@ -40,14 +49,14 @@ export async function DELETE(request: Request) {
     const filesCollection = db.collection('files');
 
     const result = await filesCollection.deleteOne({ url });
-
-    if (result.deletedCount === 1) {
-      return NextResponse.json({ success: true, message: 'File URL deleted from MongoDB' });
-    } else {
-      return NextResponse.json({ success: false, error: 'File URL not found in MongoDB' }, { status: 404 });
+    
+    if (result.deletedCount === 0) {
+      return NextResponse.json({ success: false, error: 'File not found' }, { status: 404 });
     }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('Error deleting file URL from MongoDB:', error);
-    return NextResponse.json({ success: false, error: 'Failed to delete file URL from MongoDB' }, { status: 500 });
+    console.error('Error deleting file:', error);
+    return NextResponse.json({ success: false, error: 'Failed to delete file' }, { status: 500 });
   }
 }

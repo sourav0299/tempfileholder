@@ -5,8 +5,13 @@ import DownloadButton from "../app/components/downloadButton";
 import { Toaster, toast } from "react-hot-toast";
 import UploadProgress from "./components/UploadProgress";
 
+interface UploadResult {
+  secure_url: string;
+  public_id: string;
+}
+
 export default function Home() {
-  const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<Array<{ url: string; public_id: string }>>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [fileSizes, setFileSizes] = useState<Record<string, number>>({});
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -60,17 +65,17 @@ export default function Home() {
         [fileId]: { ...data, status: 'uploading' }
       }));
 
-      const url = await uploadToServer(data.file, fileId);
-      console.log('Upload result:', url);
+      const result = await uploadToServer(data.file, fileId);
+      console.log('Upload result:', result);
 
-      if (url) {
+      if (result) {
         // Remove completed upload from queue
         setUploadQueue(prev => {
           const newQueue = { ...prev };
           delete newQueue[fileId];
           return newQueue;
         });
-        setUploadedFiles(prev => [...prev, url]);
+        setUploadedFiles(prev => [...prev, { url: result.secure_url, public_id: result.public_id }]);
         toast.success(`${data.file.name} uploaded successfully`);
       }
     } catch (error) {
@@ -188,7 +193,7 @@ export default function Home() {
       const response = await fetch("/api/files");
       const data = await response.json();
       if (data.success) {
-        setUploadedFiles(data.files.map((file: { url: string }) => file.url));
+        setUploadedFiles(data.files);
       } else {
         toast.error("Failed to fetch files");
       }
@@ -242,7 +247,7 @@ export default function Home() {
     }
   };
 
-  const uploadToServer = async (file: File, fileId: string) => {
+  const uploadToServer = async (file: File, fileId: string): Promise<UploadResult | null> => {
     console.log('Starting upload for:', { fileId, fileName: file.name, size: file.size });
     let isCancelled = false;
     let currentController: AbortController | null = null;
@@ -295,7 +300,10 @@ export default function Home() {
             }
           }));
 
-          return data.url;
+          // Store the file URL and return the upload result
+          await storeFileUrl({ secure_url: data.url, public_id: data.public_id });
+          return { secure_url: data.url, public_id: data.public_id };
+
         } catch (error) {
           if (error instanceof Error && error.name === 'AbortError') {
             console.log('Upload aborted');
@@ -388,8 +396,8 @@ export default function Home() {
 
       if (uploadedUrl && !isCancelled) {
         console.log('Upload completed successfully');
-        await storeFileUrl(uploadedUrl);
-        return uploadedUrl;
+        await storeFileUrl({ secure_url: uploadedUrl, public_id: '' });
+        return { secure_url: uploadedUrl, public_id: '' };
       }
       return null;
 
@@ -410,14 +418,17 @@ export default function Home() {
     }
   };
 
-  const storeFileUrl = async (url: string) => {
+  const storeFileUrl = async (uploadResult: UploadResult) => {
     try {
       const response = await fetch("/api/files", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ 
+          url: uploadResult.secure_url,
+          public_id: uploadResult.public_id
+        }),
       });
       const data = await response.json();
       if (!data.success) {
@@ -453,26 +464,16 @@ export default function Home() {
     }
   };
 
-  const handleDelete = async (url: string) => {
+  const handleDelete = async (file: { url: string; public_id: string }) => {
     try {
-      console.log('Attempting to delete:', url);
-      
-      // Extract the public ID from the Cloudinary URL
-      const matches = url.match(/\/v\d+\/([^/]+)\.[^.]+$/);
-      if (!matches || !matches[1]) {
-        console.error('Invalid Cloudinary URL format:', url);
-        throw new Error('Invalid file URL format');
-      }
-      
-      const publicId = matches[1];
-      console.log('Extracted public ID:', publicId);
+      console.log('Attempting to delete file:', file);
 
-      // Try to delete from Cloudinary first
-      const cloudinaryResponse = await deleteFile(publicId);
+      // Try to delete from Cloudinary first using the stored public_id
+      const cloudinaryResponse = await deleteFile(file.public_id);
       console.log('Cloudinary delete response:', cloudinaryResponse);
 
-      if (cloudinaryResponse.error) {
-        throw new Error(cloudinaryResponse.error);
+      if (!cloudinaryResponse.success) {
+        throw new Error(cloudinaryResponse.error || 'Failed to delete from Cloudinary');
       }
 
       // If Cloudinary delete was successful, delete from MongoDB
@@ -481,7 +482,7 @@ export default function Home() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url: file.url }),
       });
 
       const mongoDbData = await mongoDbResponse.json();
@@ -492,12 +493,11 @@ export default function Home() {
       }
 
       // Update the UI only after both deletions are successful
-      setUploadedFiles((prevFiles) => prevFiles.filter((file) => file !== url));
+      setUploadedFiles((prevFiles) => prevFiles.filter((f) => f.url !== file.url));
       toast.success("File deleted successfully");
 
     } catch (error) {
       console.error("Delete error:", error);
-      // More specific error messages based on the error
       const errorMessage = error instanceof Error 
         ? error.message
         : "Failed to delete file";
@@ -544,6 +544,7 @@ export default function Home() {
   };
 
   const getFileType = (url: string) => {
+    if (!url) return "other";
     const extension = url.split(".").pop()?.toLowerCase();
     if (["jpg", "jpeg", "png", "gif", "webp"].includes(extension || ""))
       return "image";
@@ -584,7 +585,7 @@ export default function Home() {
 
   const fetchFileSizes = async () => {
     const sizes: Record<string, number> = {};
-    for (const url of uploadedFiles) {
+    for (const url of uploadedFiles.map(file => file.url)) {
       if (!fileSizes[url]) {
         sizes[url] = await getFileSize(url);
       } else {
@@ -666,22 +667,22 @@ export default function Home() {
           <div className="mt-4 w-full flex items-center justify-center flex-col">
             <h2 className="text-lg font-semibold mb-2">Uploaded Files:</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-              {uploadedFiles.slice(0, 9).map((url, index) => {
-                const fileType = getFileType(url);
+              {uploadedFiles.slice(0, 9).map((file, index) => {
+                const fileType = getFileType(file.url);
                 return (
                   <div key={index} className="relative">
                     <div className="w-[250px] h-[250px] bg-gray-100 rounded-lg overflow-hidden">
                       <div className="w-full h-full flex items-center justify-center relative group">
                         {fileType === "image" && (
                           <img
-                            src={url}
+                            src={file.url}
                             alt={`File ${index + 1}`}
                             className="object-contain w-full h-full p-2"
                           />
                         )}
                         {fileType === "video" && (
                           <video
-                            src={url}
+                            src={file.url}
                             className="object-contain w-full h-full p-2"
                             controls
                           />
@@ -691,15 +692,13 @@ export default function Home() {
                             <div className="text-4xl mb-2">
                               {getFileIcon(fileType)}
                             </div>
-                            <audio src={url} controls className="w-full" />
+                            <audio src={file.url} controls className="w-full" />
                           </div>
                         )}
                         {(fileType === "document" || fileType === "other") && (
                           <div className="w-full h-full relative">
                             <iframe
-                              src={`${getGoogleViewerUrl(
-                                url
-                              )}&embedded=true&chrome=false&rm=minimal`}
+                              src={`${getGoogleViewerUrl(file.url)}&embedded=true&chrome=false&rm=minimal`}
                               className="absolute inset-0 w-full h-full"
                               frameBorder="0"
                               scrolling="no"
@@ -715,10 +714,10 @@ export default function Home() {
                         )}
                         <div className="absolute inset-0 bg-black bg-opacity-50 opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
                           <div className="flex gap-2">
-                            <DeleteButton onDelete={() => handleDelete(url)} />
+                            <DeleteButton onDelete={() => handleDelete(file)} />
                             <DownloadButton
-                              url={url}
-                              fileSize={fileSizes[url] || 0}
+                              url={file.url}
+                              fileSize={fileSizes[file.url] || 0}
                               className="mr-2"
                             />
                           </div>
@@ -726,7 +725,7 @@ export default function Home() {
                       </div>
                     </div>
                     <p className="mt-1 text-sm text-gray-500 truncate">
-                      {url.split("/").pop()}
+                      {file.url.split("/").pop()}
                     </p>
                   </div>
                 );

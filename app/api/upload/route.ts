@@ -21,17 +21,26 @@ export async function POST(request: NextRequest) {
 
     const result = await new Promise((resolve, reject) => {
       cloudinary.uploader.upload_stream(
-        { resource_type: 'auto', upload_preset: 'sourav0299' },
+        { resource_type: 'auto' },
         (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
+          if (error) {
+            console.error('Cloudinary upload error:', error);
+            reject(error);
+          } else {
+            console.log('Cloudinary upload result:', result);
+            resolve(result);
+          }
         }
       ).end(buffer);
     });
 
-    return NextResponse.json({ url: (result as any).secure_url });
+    return NextResponse.json({ 
+      success: true, 
+      url: (result as any).secure_url,
+      public_id: (result as any).public_id
+    });
   } catch (error) {
     console.error('Upload error:', error);
-    return NextResponse.json({ error: 'Upload failed' }, { status: 500 });
+    return NextResponse.json({ success: false, error: 'Upload failed' }, { status: 500 });
   }
 }
